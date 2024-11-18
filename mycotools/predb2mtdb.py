@@ -15,7 +15,7 @@ from collections import Counter, defaultdict
 from mycotools.lib.kontools import gunzip, mkOutput, format_path, eprint, vprint
 from mycotools.lib.biotools import gff2list, list2gff, fa2dict, dict2fa, \
     gff3Comps, gff2Comps, gtfComps
-from mycotools.lib.dbtools import mtdb, primaryDB, loginCheck
+from mycotools.lib.dbtools import mtdb, mtdb_light, primaryDB, loginCheck
 from mycotools.utils.gtf2gff3 import main as gtf2gff3
 from mycotools.utils.curGFF3 import main as curGFF3
 from mycotools.utils.gff2gff3 import main as gff2gff3
@@ -110,13 +110,16 @@ def gen_predb():
 
     return outputStr
 
-def read_predb(predb_path, spacer = '\t'):
-    """Modified to handle optional GFF/FAA"""
+def read_predb(predb_path, spacer='\t', light_mode=False):
+    """Modified to handle optional GFF/FAA in light mode"""
     required_headers = {
         'assembly_accession', 'genus', 'assemblyPath',
         'genomeSource (ncbi/jgi/new)'
-    }  # Remove gffPath from required headers
+    }  # gffPath no longer required in light mode
     
+    if not light_mode:
+        required_headers.add('gffPath')  # Only require GFF in full mode
+
     allowed_headers = {
         'previous_ome', 'assembly_acc', 'assembly_accession',
         'genus', 'species', 'strain', 'version', 'biosample',
@@ -681,7 +684,7 @@ def batch_process_genomes(cur_cmds, max_cpus=None):
     return results
 
 def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', 
-         forbidden=set(), cpus=1, exit=False, remove=False):
+         forbidden=set(), cpus=1, exit=False, remove=False, light_mode=False):
     """Process predb files into MycotoolsDB format with optional GFF/FAA"""
     # Ensure working directory has trailing slash and is absolute
     wrk_dir = os.path.abspath(wrk_dir)
@@ -695,8 +698,8 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t',
             os.makedirs(dir_path)
             
     # Read the predb file and reference database
-    predb_data = read_predb(predb)
-    ref_db = mtdb(refdb) if refdb else mtdb(primaryDB())
+    predb_data = read_predb(predb, light_mode=light_mode)
+    ref_db = mtdb_light(refdb) if light_mode else mtdb(refdb or primaryDB())
     
     # Now pass the parsed predb data
     infdb = predb2mtdb(predb_data)
@@ -727,17 +730,30 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t',
         for cur_cmd in tqdm(cur_cmds, total=len(cur_cmds)):
             cur_data.append(cur_mngr(*cur_cmd))
             
-    for data in cur_data:
-        if not data[1]:
-            failed.append(add2failed(omedb[data[0]]))
-            del omedb[data[0]]
-        else:
-            ome, fna_path, gff3_path, faa_path = data
-            omedb[ome]['fna'] = fna_path
-            omedb[ome]['gff3'] = gff3_path if gff3_path else ''
-            omedb[ome]['faa'] = faa_path if faa_path else ''
-            omedb[ome]['has_gff'] = 'yes' if gff3_path else 'no'
-            omedb[ome]['has_faa'] = 'yes' if faa_path else 'no'
+    # Process results based on mode
+    if light_mode:
+        # Skip GFF/FAA processing
+        for data in cur_data:
+            if not data[1]:
+                failed.append(add2failed(omedb[data[0]]))
+                del omedb[data[0]]
+            else:
+                ome, fna_path = data[:2]
+                omedb[ome]['fna'] = fna_path
+                omedb[ome]['gff3'] = ''  # Empty for light mode
+                omedb[ome]['faa'] = ''   # Empty for light mode
+    else:
+        for data in cur_data:
+            if not data[1]:
+                failed.append(add2failed(omedb[data[0]]))
+                del omedb[data[0]]
+            else:
+                ome, fna_path, gff3_path, faa_path = data
+                omedb[ome]['fna'] = fna_path
+                omedb[ome]['gff3'] = gff3_path if gff3_path else ''
+                omedb[ome]['faa'] = faa_path if faa_path else ''
+                omedb[ome]['has_gff'] = 'yes' if gff3_path else 'no'
+                omedb[ome]['has_faa'] = 'yes' if faa_path else 'no'
 
     return omedb.reset_index(), failed
 
@@ -757,6 +773,8 @@ def cli():
                        help='Skip failing genomes')
     parser.add_argument('--cpus', type=int, default=mp.cpu_count(),
                        help='Number of CPUs to use (default: all available)')
+    parser.add_argument('--light', action='store_true',
+                       help='Create light database without GFF/FAA requirements')
     args = parser.parse_args()
 
     if args.predb is None:
@@ -768,7 +786,7 @@ def cli():
         wrk_dir += '/'
     
     main(args.predb, args.refdb, wrk_dir=wrk_dir, 
-         cpus=args.cpus, exit=not args.skip)
+         cpus=args.cpus, exit=not args.skip, light_mode=args.light)
     
 if __name__ == '__main__':
     cli()
