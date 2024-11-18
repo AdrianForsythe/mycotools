@@ -28,8 +28,9 @@ predb_headers = [
     'assembly_accession', 'previous_ome', 
     'genus', 'species', 'strain', 'version', 'biosample',
     'assemblyPath', 'gffPath', 'genomeSource (ncbi/jgi/new)', 
-    'useRestriction (yes/no)', 'published'
-    ]
+    'useRestriction (yes/no)', 'published',
+    'has_gff', 'has_faa'
+]
 
 
 def acq_forbid_omes(file_path):
@@ -110,11 +111,12 @@ def gen_predb():
     return outputStr
 
 def read_predb(predb_path, spacer = '\t'):
-    """Read in a predatbase TSV and attempt to acquire the necessary columns
-    for converting into the predb dataframe"""
-
-    required_headers = {'assembly_accession', 'genus', 'assemblyPath',
-                    'gffPath', 'genomeSource (ncbi/jgi/new)'}
+    """Modified to handle optional GFF/FAA"""
+    required_headers = {
+        'assembly_accession', 'genus', 'assemblyPath',
+        'genomeSource (ncbi/jgi/new)'
+    }  # Remove gffPath from required headers
+    
     allowed_headers = {
         'previous_ome', 'assembly_acc', 'assembly_accession',
         'genus', 'species', 'strain', 'version', 'biosample',
@@ -242,6 +244,17 @@ def read_predb(predb_path, spacer = '\t'):
         # add a blank entry for each missing column from the entire predb
         for missing_header in missing_from_predb:
             predb[missing_header].append('')
+
+    # Add validation for optional files
+    if not 'has_gff' in predb:
+        predb['has_gff'] = ['yes' if os.path.exists(p) else 'no' 
+                           for p in predb.get('gffPath', [])]
+    if not 'has_faa' in predb:
+        predb['has_faa'] = ['no'] * len(predb['assembly_acc'])  # Default to no
+
+    # Make gffPath optional
+    if not 'gffPath' in predb:
+        predb['gffPath'] = [''] * len(predb['assembly_acc'])
 
     return dict(predb)
 
@@ -427,15 +440,19 @@ def cur_fna(cur_raw_fna_path, uncur_raw_fna_path, ome):
 
 def mmap_file_read(filename):
     """Read a file using memory mapping"""
-    with open(filename, 'rb') as f:
-        # Create memory map of file
-        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            return mm.read().decode('utf-8')
+    try:
+        with open(filename, 'rb') as f:
+            # Create memory map of file
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                return mm.read().decode('utf-8')
+    except (IOError, OSError) as e:
+        raise IOError(f"Failed to memory map {filename}: {str(e)}")
 
 def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir, 
             source, assembly_accession, exit=False,
-            remove=False, spacer='\t\t\t', verbose=False):
-    """Process individual genome files"""
+            remove=False, spacer='\t\t\t', verbose=False,
+            has_gff='no'):  # Add flag for GFF presence
+    """Process individual genome files with optional GFF"""
     # Ensure working directory has trailing slash
     if not wrk_dir.endswith('/'):
         wrk_dir += '/'
@@ -471,62 +488,39 @@ def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir,
                 raise ie from None
             return ome, False, 'fna'
 
-    # Process GFF3 files
-    if not os.path.isfile(cur_gff_path):
-        try:
-            # Use memory mapping for large GFF files
-            if os.path.getsize(raw_gff_path) > 5_000_000:  # 5MB threshold
-                gff_content = mmap_file_read(raw_gff_path)
-                with open(uncur_gff_path, 'w') as f:
-                    f.write(gff_content)
-                gff = gff2list(uncur_gff_path)
-            else:
-                uncur_gff_path = move_biofile(raw_gff_path, ome, 'gff3', 
-                                            wrk_dir + 'gff3/', suffix = '.uncur')
-                gff = gff2list(uncur_gff_path)
-        except IOError as ie:
-            eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 parsing: {str(ie)}", 
-                  flush=True)
-            if exit:
-                raise ie from None
-            return ome, False, 'gff3'
-        except IndexError:  # malformatted GFF
-            return ome, False, 'gff3'
-        except Exception as e:  # catch all other errors
-            eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 curation: {str(e)}", 
-                  flush=True)
-            if exit:
-                raise e from None
-            return ome, False, 'gff3'
+    # Only process GFF if it exists
+    if has_gff == 'yes':
+        if not os.path.isfile(cur_gff_path):
+            try:
+                # Use memory mapping for large GFF files
+                if os.path.getsize(raw_gff_path) > 5_000_000:  # 5MB threshold
+                    gff_content = mmap_file_read(raw_gff_path)
+                    with open(uncur_gff_path, 'w') as f:
+                        f.write(gff_content)
+                    gff = gff2list(uncur_gff_path)
+                else:
+                    uncur_gff_path = move_biofile(raw_gff_path, ome, 'gff3', 
+                                                wrk_dir + 'gff3/', suffix = '.uncur')
+                    gff = gff2list(uncur_gff_path)
+            except IOError as ie:
+                eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 parsing: {str(ie)}", 
+                      flush=True)
+                if exit:
+                    raise ie from None
+                return ome, False, 'gff3'
+            except IndexError:  # malformatted GFF
+                return ome, False, 'gff3'
+            except Exception as e:  # catch all other errors
+                eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 curation: {str(e)}", 
+                      flush=True)
+                if exit:
+                    raise e from None
+                return ome, False, 'gff3'
+    else:
+        # Set empty paths for missing files
+        cur_gff_path = ''
+        faa_path = ''
         
-    # Generate proteome FAAs
-    vprint('\t\t' + predb_dir + 'faa/' + ome + '.faa', v = verbose, flush = True)
-    if not os.path.isfile(faa_path):
-        try:
-            faa = gff2seq(gff2list(cur_gff_path), fa2dict(cur_fna_path),
-                          spacer = spacer)
-            # Check for missing sequences
-            missing_seq = [0 for k, v in faa.items() if not v['sequence']]
-            if faa and len(missing_seq) == len(faa):
-                raise ValueError('no sequences generated in proteome')
-            elif missing_seq:
-                eprint(f'{spacer}\tWARNING: {len(missing_seq)} ' \
-                     +  'CDSs translated blank sequences', flush = True)
-                     
-            # Write FAA file
-            faa_dir = os.path.dirname(faa_path)
-            if not os.path.exists(faa_dir):
-                os.makedirs(faa_dir)
-            with open(faa_path + '.tmp', 'w') as out:
-                out.write(dict2fa(faa))
-            shutil.move(faa_path + '.tmp', faa_path)
-        except Exception as e:  # catch all errors
-            eprint(spacer + ome + '|' + assembly_accession \
-                 + ' failed proteome generation', flush  = True)
-            if exit:
-                raise e
-            return ome, False, 'faa'
-
     # Clean up temporary files if requested
     if remove:
         for path in [uncur_gff_path, raw_gff_path, uncur_fna_path, raw_fna_path]:
@@ -536,8 +530,7 @@ def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir,
             uncompressed = re.sub(r'\.gz$', '', path)
             if os.path.isfile(uncompressed):
                 os.remove(uncompressed)
-
-    return ome, cur_fna_path, cur_gff_path, faa_path
+    return ome, True, cur_fna_path, cur_gff_path, faa_path
 
 
 def gff_mngr(ome, gff, cur_path, source, assembly_accession):
@@ -687,8 +680,9 @@ def batch_process_genomes(cur_cmds, max_cpus=None):
     
     return results
 
-def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', forbidden=set(), cpus=1, exit=False, remove=False):
-    """Process predb files into MycotoolsDB format"""
+def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', 
+         forbidden=set(), cpus=1, exit=False, remove=False):
+    """Process predb files into MycotoolsDB format with optional GFF/FAA"""
     # Ensure working directory has trailing slash and is absolute
     wrk_dir = os.path.abspath(wrk_dir)
     if not wrk_dir.endswith('/'):
@@ -717,7 +711,8 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', forbidden=set(),
         cur_cmds.append([
             ome, row['fna'], row['gff3'], 
             wrk_dir, row['source'], row['assembly_acc'],
-            exit, remove, spacer, verbose
+            exit, remove, spacer, verbose,
+            row.get('has_gff', 'no')  # Add GFF flag to commands
         ])
 
     vprint('\nCurating data', v=verbose, flush=True)
@@ -739,8 +734,10 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', forbidden=set(),
         else:
             ome, fna_path, gff3_path, faa_path = data
             omedb[ome]['fna'] = fna_path
-            omedb[ome]['gff3'] = gff3_path
-            omedb[ome]['faa'] = faa_path
+            omedb[ome]['gff3'] = gff3_path if gff3_path else ''
+            omedb[ome]['faa'] = faa_path if faa_path else ''
+            omedb[ome]['has_gff'] = 'yes' if gff3_path else 'no'
+            omedb[ome]['has_faa'] = 'yes' if faa_path else 'no'
 
     return omedb.reset_index(), failed
 
