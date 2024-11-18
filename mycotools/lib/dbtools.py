@@ -268,6 +268,21 @@ class mtdb(dict):
         for key in self.columns:
             df[key].append(info[key])
         return df.set_index(index)
+
+class mtdb_light(mtdb):
+    """Light version of MycotoolsDB that only requires FNA files"""
+    required_columns = ['ome', 'assembly_accession', 'fna']
+    optional_columns = ['gff3', 'faa', 'genus', 'species', 'strain', 'version']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.is_light = True
+
+    def validate_entry(self, entry):
+        """Only validate FNA file existence"""
+        if not os.path.exists(entry.get('fna', '')):
+            raise FileNotFoundError(f"FNA file not found for {entry.get('ome', 'unknown')}")
+        return True
                 
 def getLogin( ncbi, jgi ):
 
