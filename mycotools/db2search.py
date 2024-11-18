@@ -25,7 +25,7 @@ from collections import defaultdict
 from mycotools.db2files import soft_main as db2files
 from mycotools.lib.kontools import intro, outro, collect_files, multisub, \
     findExecs, untardir, eprint, format_path, mkOutput, tardir, inject_args, stdin2str
-from mycotools.lib.dbtools import primaryDB, mtdb
+from mycotools.lib.dbtools import primaryDB, mtdb, mtdb_light, validate_database
 from mycotools.lib.biotools import dict2fa, fa2dict, fa2dict_str
 #from mycotools.extractHmmsearch import main as exHmm
 from mycotools.acc2fa import dbmain as acc2fa_db, famain as acc2fa_fa
@@ -38,6 +38,8 @@ def compile_hmm_cmd(db, hmm_path, output, ome_set = set(), cpu = 1):
     Inputs: mycotools db, hmm_path, output directory, set of omes to ignore.
     Outputs: tuples of arguments for hmmsearches
     """
+    if isinstance(db, mtdb_light):
+        raise ValueError("HMM searches require protein sequences. Cannot use with light database.")
 
     cmd_tuples = [ ]
     for ome, row in db.items():
@@ -47,6 +49,22 @@ def compile_hmm_cmd(db, hmm_path, output, ome_set = set(), cpu = 1):
                    '--cpu', str(cpu),
                    hmm_path, row['faa'],
                    '&&',), ('mv', output_path + '.tmp', output_path,),) 
+            cmd_tuples.append(cmd)
+
+    return cmd_tuples
+
+def compile_nhmmer_cmd(db, hmm_path, output, ome_set=set(), cpu=1):
+    """
+    New function for nucleotide HMM searches that works with light databases
+    """
+    cmd_tuples = []
+    for ome, row in db.items():
+        if ome not in ome_set:
+            output_path = output + ome + '.out'
+            cmd = (('nhmmer', '-o', output_path + '.tmp',
+                   '--cpu', str(cpu),
+                   hmm_path, row['fna'],
+                   '&&',), ('mv', output_path + '.tmp', output_path,),)
             cmd_tuples.append(cmd)
 
     return cmd_tuples
@@ -1045,9 +1063,6 @@ def cli():
         help = '[blast] Use diamond. Not recommended for ome-by-ome')
 
     p_arg = parser.add_argument_group('Search parameters')
-#    p_arg.add_argument('-bd', '--blastdb', action = 'store_true',
- #                      help = 'Make a single BLASTdb of the genomes before ' \
-  #                          + 'BLAST; DEFAULT: genome by genome')
     p_arg.add_argument('-e', '--evalue', help = 'E value threshold, e.g. ' \
         + '10^(-x) where x is the input', type = int, default = 0)
     p_arg.add_argument('-bit', '--bitscore', default = 0,
@@ -1076,8 +1091,6 @@ def cli():
     r_arg.add_argument('-c', '--cpu', type = int)
     r_arg.add_argument('--ram', help = 'Useful for mmseqs: e.g. 10M or 5G')
 
-    #parser.add_argument( '-c', '--coverage', type = float, help = 'Query coverage +/-, e.g. 0.5' )
-#    parser.add_argument('-f', '--force', action = 'store_true', help = 'Force ome-by-ome blast')
     args = parser.parse_args()
 
     if args.algorithm not in algorithms:
@@ -1103,6 +1116,22 @@ def cli():
         else:
             with open(format_path(args.query_file), 'r') as raw:
                 queries = [format_path(x.rstrip()) for x in raw.read().split()]
+
+    # Load database and check compatibility
+    db = validate_database(format_path(args.mtdb), light_mode=isinstance(db, mtdb_light))
+    is_light_db = isinstance(db, mtdb_light)
+
+    # Validate search algorithm compatibility
+    if is_light_db:
+        allowed_algorithms = {'blastn', 'nhmmer'}
+        if args.algorithm not in allowed_algorithms:
+            raise ValueError(
+                f"Light database mode only supports: {allowed_algorithms}\n"
+                f"Got: {args.algorithm}"
+            )
+        if args.diamond:
+            raise ValueError("Diamond not supported in light database mode")
+
     deps = [args.algorithm]
 
     # diamond specific
@@ -1116,6 +1145,8 @@ def cli():
 
     # mmseqs-specific 
     if args.algorithm == 'mmseqs':
+        if is_light_db:
+            raise ValueError("MMseqs searches not available in light mode")
         if not args.seqtype or args.seqtype not in {'aa', 'nt'}:
             eprint('\nERROR: -st required for mmseqs', flush = True)
             sys.exit(3)
@@ -1123,14 +1154,6 @@ def cli():
             biotype = 'faa'
         else:
             biotype = 'fna'
-#        query_set = set(queries)
- #       for query in queries:
-  #          if query + '.index' in query_set:
-   #             for ext in ['_h', '_h.index', '.lookup', '.source',
-    #                        '.dbtype', '_h.dbtype', '.index']:
-     #               if query + ext in query_set:
-      #                  query_set.remove(query + ext)
-       # queries = sorted(query_set)
     else:
         biotype = None
     findExecs(deps, exit = set(deps))
@@ -1149,7 +1172,6 @@ def cli():
         output = base
         if not os.path.isdir(output):
             os.mkdir(output)
-#            output = mkOutput(base, 'db2search')
 
     if args.cpu and args.cpu < mp.cpu_count():
         cpu = args.cpu
@@ -1173,27 +1195,32 @@ def cli():
         'Output': output, 'CPUs': cpu
         }
     start_time = intro('db2search', args_dict)
-    db = mtdb(format_path(args.mtdb))
 
-
-    # run hmm mode
-    if args.algorithm in {'hmmsearch'}:
+    # Run appropriate search
+    if args.algorithm == 'hmmsearch':
+        if is_light_db:
+            raise ValueError("HMM protein searches not available in light mode")
         output_fas = hmmer_main(db, queries, output, 
-             args.acc, args.max_hits, args.query_thresh,
-             evalue = evalue, bitscore = args.bitscore, binary = args.algorithm,
-             coords = args.coordinate, verbose = args.verbose, cpu = cpu)    
-    # run blast mode
+                              args.acc, args.max_hits, args.query_thresh,
+                              evalue=evalue, bitscore=args.bitscore, 
+                              binary=args.algorithm,
+                              coords=args.coordinate, verbose=args.verbose, 
+                              cpu=cpu)    
     elif 'blast' in args.algorithm.lower():
-        output_fas = blast_main( 
-            db, args.algorithm, queries, output, evalue = evalue,
-            bitscore = args.bitscore, pident = args.identity,
-            max_hits = args.max_hits, cpus = cpu, force = True,
-            search_arg = manual_cmd, coordinate = args.coordinate, 
-            coverage = args.query_thresh, ppos = args.positives#,
-#            blastdb = args.blastdb
+        if is_light_db and args.algorithm != 'blastn':
+            raise ValueError(
+                f"Light database mode only supports blastn, not {args.algorithm}"
             )
-    # run mmseqs
+        output_fas = blast_main(
+            db, args.algorithm, queries, output, evalue=evalue,
+            bitscore=args.bitscore, pident=args.identity,
+            max_hits=args.max_hits, cpus=cpu, force=True,
+            search_arg=manual_cmd, coordinate=args.coordinate, 
+            coverage=args.query_thresh, ppos=args.positives
+        )
     else:
+        if is_light_db:
+            raise ValueError("MMseqs searches not available in light mode")
         output_fas = mmseqs_main( 
             db, args.algorithm, queries, output, 
             max_hits = args.max_hits, evalue = evalue, 
@@ -1203,6 +1230,7 @@ def cli():
             skip = [], coordinate = args.coordinate,
             search_arg = manual_cmd, convert = args.convert, iterations = args.iterations
             )
+
     if not os.path.isdir(output + 'fastas/'):
         os.mkdir(output + 'fastas/')
 
