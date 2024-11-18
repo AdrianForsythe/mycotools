@@ -9,6 +9,7 @@ import sys
 import copy
 import shutil
 import multiprocessing as mp
+import mmap
 from tqdm import tqdm
 from collections import Counter, defaultdict
 from mycotools.lib.kontools import gunzip, mkOutput, format_path, eprint, vprint
@@ -20,6 +21,8 @@ from mycotools.utils.curGFF3 import main as curGFF3
 from mycotools.utils.gff2gff3 import main as gff2gff3
 from mycotools.utils.curGFF3 import rename_and_organize as rename_and_organize
 from mycotools.gff2seq import aamain as gff2seq
+import argparse
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 predb_headers = [
     'assembly_accession', 'previous_ome', 
@@ -50,30 +53,41 @@ def prep_output(base_dir):
     return dirs[:2]
 
 def copy_file(old_path, new_path):
+    """Copy a file with better error handling"""
     try:
         shutil.copy(old_path, new_path)
         return True
-    except:
-        raise IOError
-
+    except (IOError, OSError) as e:
+        eprint(f"\nERROR: Failed to copy file from {old_path} to {new_path}")
+        eprint(f"Error details: {str(e)}")
+        raise IOError(f"Failed to copy {old_path} to {new_path}: {str(e)}")
 
 def move_biofile(old_path, ome, typ, wrk_dir, suffix = ''):
+    """Move biological file with better error handling"""
+    old_path = format_path(old_path)
+    if not os.path.exists(old_path):
+        raise IOError(f"Input file does not exist: {old_path}")
+        
     if old_path.endswith('.gz'):
         if not os.path.isfile(old_path[:-3]):
             temp_path = gunzip(old_path)
-            new_path = wrk_dir + ome + '.' + typ +  suffix
+            new_path = wrk_dir + ome + '.' + typ + suffix
         else:
             new_path = wrk_dir + ome + '.' + typ + suffix
             temp_path = old_path[:-3]
-        copy_file(format_path(temp_path), new_path)
     else:
-        new_path = wrk_dir + ome + '.' + typ +  suffix
-        if not os.path.isfile(new_path) and os.path.isfile(old_path):
-            copy_file(format_path(old_path), new_path)
-        elif not os.path.isfile(new_path):
-            raise IOError(old_path, new_path)
-        else:
-            copy_file(format_path(old_path), new_path)
+        new_path = wrk_dir + ome + '.' + typ + suffix
+        temp_path = old_path
+
+    # Ensure the destination directory exists
+    os.makedirs(os.path.dirname(new_path), exist_ok=True)
+
+    try:
+        copy_file(temp_path, new_path)
+    except IOError as e:
+        eprint(f"\nERROR: Failed to copy {temp_path} to {new_path}")
+        eprint(f"Error details: {str(e)}")
+        raise
 
     return new_path
 
@@ -411,95 +425,117 @@ def cur_fna(cur_raw_fna_path, uncur_raw_fna_path, ome):
                     out.write(line)
     shutil.move(cur_raw_fna_path + '.tmp', cur_raw_fna_path)
 
+def mmap_file_read(filename):
+    """Read a file using memory mapping"""
+    with open(filename, 'rb') as f:
+        # Create memory map of file
+        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+            return mm.read().decode('utf-8')
+
 def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir, 
-            source, assembly_accession, exit = False,
-            remove = False, spacer = '\t\t\t', verbose = False):
+            source, assembly_accession, exit=False,
+            remove=False, spacer='\t\t\t', verbose=False):
+    """Process individual genome files"""
+    # Ensure working directory has trailing slash
+    if not wrk_dir.endswith('/'):
+        wrk_dir += '/'
 
     predb_dir = os.path.basename(os.path.dirname(wrk_dir[:-1])) + '/working/'
 
-    # assembly FNAs
-    vprint('\t' + ome, v = verbose, flush = True)
-    uncur_fna_path = wrk_dir + 'fna/' + ome + '.fna.uncur'
-    cur_fna_path = wrk_dir + 'fna/' + ome + '.fna'
-    vprint('\t\t' + predb_dir + 'fna/' + ome + '.fna', v = verbose, flush = True)
+    # Construct paths with proper directory joining
+    uncur_fna_path = os.path.join(wrk_dir, 'fna', f'{ome}.fna.uncur')
+    cur_fna_path = os.path.join(wrk_dir, 'fna', f'{ome}.fna')
+    uncur_gff_path = os.path.join(wrk_dir, 'gff3', f'{ome}.gff3.uncur')
+    cur_gff_path = os.path.join(wrk_dir, 'gff3', f'{ome}.gff3')
+    faa_path = os.path.join(wrk_dir, 'faa', f'{ome}.faa')
+        
+    # Process FNA files
     if not os.path.isfile(cur_fna_path):
         try:
-            uncur_fna_path = move_biofile(raw_fna_path, ome, 'fa', wrk_dir + 'fna/',
-                                      suffix = '.uncur')
-        except IOError as ie:
-            eprint(spacer + ome + '|' + assembly_accession \
-                 + ' failed FNA parsing', flush = True)
+            if not os.path.exists(raw_fna_path):
+                eprint(f"\nERROR: Input FNA file does not exist: {raw_fna_path}")
+                return ome, False, 'fna'
+            
+            # Use memory mapping for large FNA files
+            if os.path.getsize(raw_fna_path) > 10_000_000:  # 10MB threshold
+                fna_content = mmap_file_read(raw_fna_path)
+                with open(uncur_fna_path, 'w') as f:
+                    f.write(fna_content)
+            else:
+                uncur_fna_path = move_biofile(raw_fna_path, ome, 'fa', 
+                                            wrk_dir + 'fna/', suffix = '.uncur')
+        except (IOError, OSError) as ie:
+            eprint(f"{spacer}{ome}|{assembly_accession} failed FNA parsing: {str(ie)}", 
+                  flush=True)
             if exit:
                 raise ie from None
             return ome, False, 'fna'
-        cur_fna(cur_fna_path, uncur_fna_path, ome)
 
-    # gene coordinate GFF3s
-    uncur_gff_path = wrk_dir + 'gff3/' + ome + '.gff3.uncur'
-    cur_gff_path = wrk_dir + 'gff3/' + ome + '.gff3'
-    vprint('\t\t' + predb_dir + 'gff3/' + ome + '.gff3', v = verbose, flush = True)
+    # Process GFF3 files
     if not os.path.isfile(cur_gff_path):
         try:
-            uncur_gff_path = move_biofile(raw_gff_path, ome, 'gff3', 
-                                          wrk_dir + 'gff3/', suffix = '.uncur')
+            # Use memory mapping for large GFF files
+            if os.path.getsize(raw_gff_path) > 5_000_000:  # 5MB threshold
+                gff_content = mmap_file_read(raw_gff_path)
+                with open(uncur_gff_path, 'w') as f:
+                    f.write(gff_content)
+                gff = gff2list(uncur_gff_path)
+            else:
+                uncur_gff_path = move_biofile(raw_gff_path, ome, 'gff3', 
+                                            wrk_dir + 'gff3/', suffix = '.uncur')
+                gff = gff2list(uncur_gff_path)
         except IOError as ie:
-            eprint(spacer + ome + '|' + assembly_accession \
-                 + ' failed GFF3 parsing', flush = True)
+            eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 parsing: {str(ie)}", 
+                  flush=True)
             if exit:
                 raise ie from None
             return ome, False, 'gff3'
-        try:   
-            gff = gff2list(uncur_gff_path)
-        # malformatted
-        except IndexError:
+        except IndexError:  # malformatted GFF
             return ome, False, 'gff3'
-        try:
-            gff_mngr(ome, gff, cur_gff_path, source, assembly_accession)
-        except Exception as e: # catch all errors to continue script
-            eprint(spacer + ome + '|' + assembly_accession \
-                + ' failed GFF3 curation', flush = True)
+        except Exception as e:  # catch all other errors
+            eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 curation: {str(e)}", 
+                  flush=True)
             if exit:
                 raise e from None
             return ome, False, 'gff3'
-
-    # proteome FAAs
-    faa_path = wrk_dir + 'faa/' + ome + '.faa'
+        
+    # Generate proteome FAAs
     vprint('\t\t' + predb_dir + 'faa/' + ome + '.faa', v = verbose, flush = True)
     if not os.path.isfile(faa_path):
         try:
             faa = gff2seq(gff2list(cur_gff_path), fa2dict(cur_fna_path),
                           spacer = spacer)
-            # raise a value error if there is not a sequence for all predicted
-            # CDSs
+            # Check for missing sequences
             missing_seq = [0 for k, v in faa.items() if not v['sequence']]
             if faa and len(missing_seq) == len(faa):
                 raise ValueError('no sequences generated in proteome')
             elif missing_seq:
                 eprint(f'{spacer}\tWARNING: {len(missing_seq)} ' \
                      +  'CDSs translated blank sequences', flush = True)
-        except Exception as e: # catch all errors
+                     
+            # Write FAA file
+            faa_dir = os.path.dirname(faa_path)
+            if not os.path.exists(faa_dir):
+                os.makedirs(faa_dir)
+            with open(faa_path + '.tmp', 'w') as out:
+                out.write(dict2fa(faa))
+            shutil.move(faa_path + '.tmp', faa_path)
+        except Exception as e:  # catch all errors
             eprint(spacer + ome + '|' + assembly_accession \
                  + ' failed proteome generation', flush  = True)
             if exit:
                 raise e
             return ome, False, 'faa'
-        with open(faa_path + '.tmp', 'w') as out:
-            out.write(dict2fa(faa))
-        shutil.move(faa_path + '.tmp', faa_path)
 
+    # Clean up temporary files if requested
     if remove:
-        if os.path.isfile(uncur_gff_path):
-            os.remove(uncur_gff_path)
-        if os.path.isfile(raw_gff_path):
-            os.remove(raw_gff_path)
-        if os.path.isfile(re.sub(r'\.gz$', '', raw_gff_path)):
-            os.remove(re.sub(r'\.gz$', '', raw_gff_path))
-        if os.path.isfile(uncur_fna_path):
-            os.remove(uncur_fna_path)
-        if os.path.isfile(raw_fna_path):
-            os.remove(raw_fna_path)
-        if os.path.isfile(re.sub(r'\.gz$', '', raw_fna_path)):
-            os.remove(re.sub(r'\.gz$', '', raw_fna_path))
+        for path in [uncur_gff_path, raw_gff_path, uncur_fna_path, raw_fna_path]:
+            if os.path.isfile(path):
+                os.remove(path)
+            # Also remove uncompressed versions
+            uncompressed = re.sub(r'\.gz$', '', path)
+            if os.path.isfile(uncompressed):
+                os.remove(uncompressed)
 
     return ome, cur_fna_path, cur_gff_path, faa_path
 
@@ -583,20 +619,97 @@ def add2failed(row):
     else:
         return [row['assembly_acc'], row['version']]
 
-def main(
-    predb, refdb, wrk_dir, 
-    verbose = False, spacer = '\t\t\t', forbidden = set(), 
-    cpus = 1, exit = False, remove = False
-    ):
+def batch_process_genomes(cur_cmds, max_cpus=None):
+    """Process genomes in parallel with improved I/O handling and memory management"""
+    n_cpus = min(max_cpus or mp.cpu_count(), mp.cpu_count())
+    
+    # Pre-validate all input files before processing
+    valid_cmds = []
+    failed_files = defaultdict(list)  # Track which files are missing for each genome
+    
+    for cmd in cur_cmds:
+        ome, raw_fna, raw_gff, wrk_dir, *_ = cmd
+        raw_fna = format_path(raw_fna)
+        raw_gff = format_path(raw_gff)
+        
+        is_valid = True
+        if not os.path.exists(raw_fna):
+            failed_files[ome].append(('FNA', raw_fna))
+            is_valid = False
+        if not os.path.exists(raw_gff):
+            failed_files[ome].append(('GFF', raw_gff))
+            is_valid = False
+            
+        if is_valid:
+            valid_cmds.append(cmd)
+    
+    # Report validation results
+    if failed_files:
+        eprint("\nValidation Failures:")
+        for ome, failures in failed_files.items():
+            eprint(f"\n{ome}:")
+            for file_type, path in failures:
+                eprint(f"  Missing {file_type}: {path}")
+    
+    if not valid_cmds:
+        raise FileNotFoundError("No valid genomes to process - all input files missing")
+    
+    eprint(f"\nProcessing {len(valid_cmds)} valid genomes out of {len(cur_cmds)} total")
+    
+    # Use ProcessPoolExecutor for better exception handling
+    results = []
+    failed_processing = []
+    with ProcessPoolExecutor(max_workers=n_cpus) as executor:
+        futures = {executor.submit(cur_mngr, *cmd): cmd for cmd in valid_cmds}
+        for f in tqdm(as_completed(futures), 
+                     total=len(valid_cmds), 
+                     desc='Processing genomes'):
+            try:
+                result = f.result()
+                if result[1]:  # Check if processing was successful
+                    results.append(result)
+                else:
+                    cmd = futures[f]
+                    ome = cmd[0]
+                    failed_processing.append((ome, result[2]))  # Store failure reason
+            except Exception as e:
+                cmd = futures[f]
+                ome = cmd[0]
+                failed_processing.append((ome, str(e)))
+    
+    # Report processing failures
+    if failed_processing:
+        eprint("\nProcessing Failures:")
+        for ome, error in failed_processing:
+            eprint(f"\n{ome}: {error}")
+    
+    eprint(f"\nSuccessfully processed {len(results)} out of {len(valid_cmds)} valid genomes")
+    
+    return results
 
-    for dir_ in [wrk_dir + 'fna/', wrk_dir + 'gff3/', wrk_dir + 'faa/']:
-        if not os.path.isdir(dir_):
-            os.mkdir(dir_)
+def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t', forbidden=set(), cpus=1, exit=False, remove=False):
+    """Process predb files into MycotoolsDB format"""
+    # Ensure working directory has trailing slash and is absolute
+    wrk_dir = os.path.abspath(wrk_dir)
+    if not wrk_dir.endswith('/'):
+        wrk_dir += '/'
 
-    infdb = predb2mtdb(predb)
-    vprint('\nGenerating omes', v = verbose, flush = True)
-    omedb, failed = gen_omes(infdb, refdb, ome_col = 'ome', forbidden = forbidden,
-                     spacer = spacer)
+    # Create subdirectories with proper path joining
+    for subdir in ['fna', 'gff3', 'faa']:
+        dir_path = os.path.join(wrk_dir, subdir)
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            
+    # Read the predb file and reference database
+    predb_data = read_predb(predb)
+    ref_db = mtdb(refdb) if refdb else mtdb(primaryDB())
+    
+    # Now pass the parsed predb data
+    infdb = predb2mtdb(predb_data)
+    
+    vprint('\nGenerating omes', v=verbose, flush=True)
+    omedb, failed = gen_omes(infdb, ref_db, ome_col='ome', 
+                            forbidden=forbidden, spacer=spacer)    
     
     cur_cmds = []
     omedb = omedb.set_index('ome')
@@ -605,17 +718,20 @@ def main(
             ome, row['fna'], row['gff3'], 
             wrk_dir, row['source'], row['assembly_acc'],
             exit, remove, spacer, verbose
-            ])
+        ])
 
-    vprint('\nCurating data', v = verbose, flush = True)
+    vprint('\nCurating data', v=verbose, flush=True)
+    
     if cpus > 1:
-        with mp.Pool(processes = cpus) as pool:
-            cur_data = pool.starmap(cur_mngr, tqdm(cur_cmds, total = len(cur_cmds)))
+        cur_data = batch_process_genomes(
+            cur_cmds, 
+            max_cpus=cpus
+        )
     else:
         cur_data = []
-        for cur_cmd in tqdm(cur_cmds, total = len(cur_cmds)):
+        for cur_cmd in tqdm(cur_cmds, total=len(cur_cmds)):
             cur_data.append(cur_mngr(*cur_cmd))
-
+            
     for data in cur_data:
         if not data[1]:
             failed.append(add2failed(omedb[data[0]]))
@@ -633,51 +749,29 @@ def cli():
     usage = 'Generate a predb file:\npredb2mtdb\n\nCreate a mycotoolsdb ' + \
     'from a predb file:\npredb2mtdb <PREDBFILE>\n\nCreate a mycotoolsdb ' + \
     'referencing an alternative master database:\npredb2mtdb <PREDBFILE> ' + \
-    '<REFERENCEDB>\nSkip failing genomes:\npredb2mtdb <PREDBFILE> -s'
+    '<REFERENCEDB>\nSkip failing genomes:\npredb2mtdb <PREDBFILE> -s\n\n' + \
+    'Control CPU usage:\npredb2mtdb <PREDBFILE> --cpus <NUMBER>\n' + \
+    'Default behavior uses all available CPUs.'
 
-    if any(x in {'-h', '--help', '-help'} for x in sys.argv):
-        eprint('\n' + usage + '\n', flush = True)
-        sys.exit(0)
-    elif len(sys.argv) == 1:
+    parser = argparse.ArgumentParser(description=usage)
+    parser.add_argument('predb', nargs='?', help='Path to predb file')
+    parser.add_argument('refdb', nargs='?', help='Reference database')
+    parser.add_argument('-s', '--skip', action='store_true',
+                       help='Skip failing genomes')
+    parser.add_argument('--cpus', type=int, default=mp.cpu_count(),
+                       help='Number of CPUs to use (default: all available)')
+    args = parser.parse_args()
+
+    if args.predb is None:
         print(gen_predb())
         sys.exit(0)
-    elif len(sys.argv) >= 3:
-        if sys.argv[2] not in {'-s', '--skip'}:
-            refDB = mtdb(format_path(sys.argv[2]))
-        elif len(sys.argv) > 3:
-            refDB = mtdb(format_path(sys.argv[3]))
-        else:
-            refDB = mtdb(primaryDB())
-    else:
-        refDB = mtdb(primaryDB())
 
-    if set(sys.argv).intersection({'-s', '--skip'}):
-        exit = False
-    else:
-        exit = True
-
- #   from Bio import Entrez
-#    ncbi_email, ncbi_api, jgi_email, jgi_pwd = loginCheck(jgi = False)
-  #  Entrez.email = ncbi_email
-   # if ncbi_api:
-    #    Entrez.api_key = ncbi_api
-
-    eprint('\nPreparing run', flush = True)
-    predb = read_predb(format_path(sys.argv[1]), spacer = '\t')
-    out_dir, wrk_dir = prep_output(os.path.dirname(format_path(sys.argv[1])))
-
-    forbid_omes = acq_forbid_omes(file_path = format_path('$MYCODB/../log/relics.txt'))
-
-    omedb, failed = main(predb, refDB, wrk_dir, exit = exit, verbose = True,
-                         forbidden = forbid_omes)
-
-#    from mycotools.lib.dbtools import gather_taxonomy, assimilate_tax
-#    tax_dicts = gather_taxonomy(omedb, api_key = ncbi_api)
- #   outdb, genus_dicts = assimilate_tax(omedb, tax_dicts)
-  #  outdb.df2db(out_dir + 'predb2mtdb.mtdb')
-    omedb.df2db(out_dir + 'predb2mtdb.mtdb')
-    sys.exit(0)
-
-
+    wrk_dir = os.path.abspath('./predb2mtdb_working')
+    if not wrk_dir.endswith('/'):
+        wrk_dir += '/'
+    
+    main(args.predb, args.refdb, wrk_dir=wrk_dir, 
+         cpus=args.cpus, exit=not args.skip)
+    
 if __name__ == '__main__':
     cli()
