@@ -920,3 +920,37 @@ if os.path.isfile(interface):
 #if not primaryDB():
 #    eprint('WARNING: Primary MycotoolsDB not connected; setup using `mtdb u/-i/-p/-f`', flush = True)
 
+def validate_database(db_path, light_mode=False):
+    """Validate and load a MycotoolsDB database
+    
+    Args:
+        db_path (str): Path to the database file
+        light_mode (bool): Whether to load database in light mode (FNA only)
+    
+    Returns:
+        mtdb or mtdb_light: Database object
+        
+    Raises:
+        SystemExit: If database loading fails
+    """
+    try:
+        # Format and validate path
+        db_path = format_path(db_path)
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"Database file not found: {db_path}")
+
+        # Load appropriate database type
+        if light_mode:
+            db = mtdb_light(db_path)
+        else:
+            db = mtdb(db_path)
+
+        return db
+
+    except FileNotFoundError as e:
+        eprint(f"\nERROR: {str(e)}")
+        sys.exit(5)
+    except Exception as e:
+        eprint(f"\nERROR: Failed to load database: {str(e)}")
+        sys.exit(5)
+
