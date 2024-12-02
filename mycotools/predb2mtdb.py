@@ -415,6 +415,7 @@ def gen_omes(
     return newdb, t_failed
 
 def cur_fna(cur_raw_fna_path, uncur_raw_fna_path, ome):
+    """Curate FNA file by updating sequence names"""
     ome_ver = re.search(r'(.{6}\d+).(\d+)$', ome)
     if ome_ver:
         less_ome = ome_ver[1]
@@ -422,6 +423,8 @@ def cur_fna(cur_raw_fna_path, uncur_raw_fna_path, ome):
     else:
         less_ome = ome
         ver_num = 0
+
+    # Process the file
     with open(cur_raw_fna_path + '.tmp', 'w') as out:
         with open(uncur_raw_fna_path, 'r') as in_:
             for line in in_:
@@ -433,6 +436,7 @@ def cur_fna(cur_raw_fna_path, uncur_raw_fna_path, ome):
                             new_line = re.sub(r'^>' + less_ome + r'\.\d+_', '>' + ome + '_',
                                               line)
                         else:
+                            # If no recognizable pattern, just add the ome prefix
                             new_line = '>' + ome + '_' + line[1:]
                         out.write(new_line)
                     else: # already curated
@@ -454,7 +458,7 @@ def mmap_file_read(filename):
 def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir, 
             source, assembly_accession, exit=False,
             remove=False, spacer='\t\t\t', verbose=False,
-            has_gff='no'):  # Add flag for GFF presence
+            has_gff='no'):  
     """Process individual genome files with optional GFF"""
     # Ensure working directory has trailing slash
     if not wrk_dir.endswith('/'):
@@ -482,8 +486,10 @@ def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir,
                 with open(uncur_fna_path, 'w') as f:
                     f.write(fna_content)
             else:
-                uncur_fna_path = move_biofile(raw_fna_path, ome, 'fa', 
+                uncur_fna_path = move_biofile(raw_fna_path, ome, 'fna', 
                                             wrk_dir + 'fna/', suffix = '.uncur')
+            # Curate the FNA file regardless of GFF presence
+            cur_fna(cur_fna_path, uncur_fna_path, ome)
         except (IOError, OSError) as ie:
             eprint(f"{spacer}{ome}|{assembly_accession} failed FNA parsing: {str(ie)}", 
                   flush=True)
@@ -505,6 +511,10 @@ def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir,
                     uncur_gff_path = move_biofile(raw_gff_path, ome, 'gff3', 
                                                 wrk_dir + 'gff3/', suffix = '.uncur')
                     gff = gff2list(uncur_gff_path)
+
+                # Process the GFF file
+                gff_mngr(ome, gff, cur_gff_path, source, assembly_accession)
+
             except IOError as ie:
                 eprint(f"{spacer}{ome}|{assembly_accession} failed GFF3 parsing: {str(ie)}", 
                       flush=True)
@@ -533,81 +543,8 @@ def cur_mngr(ome, raw_fna_path, raw_gff_path, wrk_dir,
             uncompressed = re.sub(r'\.gz$', '', path)
             if os.path.isfile(uncompressed):
                 os.remove(uncompressed)
+
     return ome, True, cur_fna_path, cur_gff_path, faa_path
-
-
-def gff_mngr(ome, gff, cur_path, source, assembly_accession):
-
-    gffVer, alias = None, False
-    for entry in gff:
-        if re.search(gff3Comps()['id'], entry['attributes']):
-            gffVer = 3
-            alias = re.search(gff3Comps()['Alias'], entry['attributes'])
-            if alias is not None:
-#                if entry['seqid'].startswith(ome + '_'):
-                alias = True
-                #else:
-                 #   alias = False # remove the old aliases
-                  #  entry['attributes'] = re.sub(r';?Alias=[^;]+', '',
-                  #                              entry['attributes'])
-            else:
-                break
-        elif re.search(gtfComps()['id'], entry['attributes']):
-            gffVer = 2.5
-            break
-        elif re.search(gff2Comps()['id'], entry['attributes']):
-            gffVer = 2
-            break
-
-    if gffVer == 3:
-#        if source == 'new':
-        if alias: #already curated
-            try:
-                new_gff = copy.deepcopy(gff)
-                old_ome_p = re.search(gff3Comps()['Alias'], new_gff[0]['attributes'])[1]
-                old_ome = old_ome_p[:old_ome_p.find('_')]
-                for entry in new_gff:
-#                    alias0 = re.search(gff3Comps()['Alias'], entry['attributes'])[1]
- #                   alias_num = alias0[alias0.find('_') + 1:]
-#                    new_alias = ome + '_' + alias_num
- #                   entry['attributes'] = re.sub(
-  #                      gff3Comps()['Alias'], 'Alias='+ new_alias,
-   #                     entry['attributes']
-    #                    )
-                    entry['attributes'] = entry['attributes'].replace(old_ome, ome)
-                new_gff = rename_and_organize(new_gff)
-                gff = new_gff
-            except:
-                gff = curGFF3(gff, ome, cur_seqids = True)
-#        else:
- #           gff = curGFF3(gff, ome)
-        else:
-            gff = curGFF3(gff, ome, cur_seqids = True)
-    elif gffVer == 2.5:
-        gff, trans_str, failed, flagged = gtf2gff3(gff, ome)
-    else:
-        gff, errors = gff2gff3(gff, ome, assembly_accession, verbose = False)
-
-    ver_search = re.search(r'(.{6}\d+)\.(\d+)', ome)
-    if ver_search is not None:
-        less_ome = ver_search[1]
-        ome_ver = ver_search[2]
-    else:
-        less_ome = ome
-    for line in gff:
-        seqid = line['seqid']
-        if seqid.startswith(less_ome + '_'):
-            line['seqid'] = re.sub(r'^' + less_ome + '_', 
-                                 ome + '_', seqid)
-        elif re.search(r'^' + less_ome + r'\.\d+_', seqid):
-            line['seqid'] = re.sub(r'^' + less_ome + r'[^_]+_', 
-                                 ome + '_', seqid)
-        else:
-            line['seqid'] = ome + '_' + seqid
-
-    with open(cur_path + '.tmp', 'w') as out:
-        out.write(list2gff(gff))
-    shutil.move(cur_path + '.tmp', cur_path)
 
 def add2failed(row):
     if isinstance(row['assembly_acc'], float) or not row['assembly_acc']:
