@@ -1407,9 +1407,8 @@ def check_add_mtdb(orig_mtdb, add_mtdb, update_path, overwrite=True):
         return add_mtdb.reset_index()
 
 
-def db2primary(addDB, refDB, save=False, combined=False):
-    """Finalize an update by converting the updated MTDB into the primary
-    MTDB"""
+def db2primary(addDB, refDB, save=False, combined=False, light_mode=False):
+    """Finalize an update by converting the updated MTDB into the primary MTDB"""
     if save:
         move_ns = shutil.copy
     else:
@@ -1417,7 +1416,7 @@ def db2primary(addDB, refDB, save=False, combined=False):
 
     addDB = addDB.reset_index()
     refDB = refDB.reset_index()
-
+    
     refOmes = set(refDB["ome"])
     addOmes = set(addDB["ome"])
     base_ome2update_ome = {re.search(r"^[^\d]+\d+", x)[0]: x for x in refDB["ome"] if x}
@@ -1429,26 +1428,31 @@ def db2primary(addDB, refDB, save=False, combined=False):
             "ERROR: ome codes exist in database. Rerun predb2mtdb or remove manually"
         )
     for i, ome in enumerate(addDB["ome"]):
-        base_ome = re.search(r"^[^\d]+\d+", ome)[0]
-        if base_ome in base_ome2update_ome:
-            update_ome = base_ome2update_ome[base_ome]
-            updates[update_ome] = ome
-            del refDB[update_ome]
-        if os.path.isfile(addDB["gff3"][i]):
-            move_ns(addDB["gff3"][i], format_path("$MYCOGFF3/" + ome + ".gff3"))
-        elif not os.path.isfile(format_path("$MYCOGFF3/" + ome + ".gff3")):
-            raise FileNotFoundError(f"{ome} missing gff3 for unknown reason")
+        # Handle FNA files (required in both modes)
         if os.path.isfile(addDB["fna"][i]):
             move_ns(addDB["fna"][i], format_path("$MYCOFNA/" + ome + ".fna"))
         elif not os.path.isfile(format_path("$MYCOFNA/" + ome + ".fna")):
             raise FileNotFoundError(f"{ome} missing fna for unknown reason")
-        if os.path.isfile(addDB["faa"][i]):
-            move_ns(addDB["faa"][i], format_path("$MYCOFAA/" + ome + ".faa"))
-        elif not os.path.isfile(format_path("$MYCOFAA/" + ome + ".faa")):
-            raise FileNotFoundError(f"{ome} missing faa for unknown reason")
-        addDB["gff3"][i] = os.environ["MYCOGFF3"] + ome + ".gff3"
         addDB["fna"][i] = os.environ["MYCOFNA"] + ome + ".fna"
-        addDB["faa"][i] = os.environ["MYCOFAA"] + ome + ".faa"
+
+        if not light_mode:
+            # Only process GFF3 and FAA in full mode
+            if os.path.isfile(addDB["gff3"][i]):
+                move_ns(addDB["gff3"][i], format_path("$MYCOGFF3/" + ome + ".gff3"))
+            elif not os.path.isfile(format_path("$MYCOGFF3/" + ome + ".gff3")):
+                raise FileNotFoundError(f"{ome} missing gff3 for unknown reason")
+
+            if os.path.isfile(addDB["faa"][i]):
+                move_ns(addDB["faa"][i], format_path("$MYCOFAA/" + ome + ".faa"))
+            elif not os.path.isfile(format_path("$MYCOFAA/" + ome + ".faa")):
+                raise FileNotFoundError(f"{ome} missing faa for unknown reason")
+
+            addDB["gff3"][i] = os.environ["MYCOGFF3"] + ome + ".gff3"
+            addDB["faa"][i] = os.environ["MYCOFAA"] + ome + ".faa"
+        else:
+            # Set empty paths for GFF3 and FAA in light mode
+            addDB["gff3"][i] = ""
+            addDB["faa"][i] = ""
     addDB = addDB.set_index()
     for ome, row in addDB.items():
         refDB[ome] = row
@@ -1474,6 +1478,7 @@ def control_flow(
     resume,
     no_md5,
     cpu,
+    light_mode,
     ncbi_email=False,
     ncbi_api=None,
     overwrite=True,
@@ -1668,11 +1673,13 @@ def control_flow(
         king = "fungi"
         rank = "kingdom"
 
-    if add or predb:  # add predb2mtdb 2 master database
+    if add or predb:
         if predb:
             add_predb = read_predb(predb_path)
             addDB, init_failed = predb2mtdb(
-                add_predb, orig_db, update_path, cpus=cpu, remove=False, spacer="\t\t"
+                add_predb, orig_db, update_path, 
+                cpus=cpu, remove=False, spacer="\t\t",
+                light_mode=light_mode  # Pass light_mode to predb2mtdb
             )
             if init_failed:
                 if not failed:
@@ -1680,21 +1687,25 @@ def control_flow(
                     sys.exit(23)
                 else:
                     eprint("\nWARNING: some genomes failed curation", flush=True)
-
         else:
             addDB = mtdb(format_path(add))
-        # we need full Paths for an addDB
-        gff_fail, fna_fail, faa_fail = False, False, False
-        if not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["gff3"]):
-            gff_fail = True
-        if not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["fna"]):
-            fna_fail = True
-        if not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["faa"]):
-            faa_fail = True
-        if gff_fail or fna_fail or faa_fail:
-            eprint("\nERROR: some paths in addition MTDB do not exist: ", flush=True)
-            eprint(f"\tFNA: {fna_fail}; GFF3: {gff_fail}; FAA: {faa_fail}", flush=True)
-            sys.exit(124)
+
+        # Modified validation for light mode
+        if light_mode:
+            # Only check FNA files in light mode
+            if not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["fna"]):
+                eprint("\nERROR: some FNA files do not exist", flush=True)
+                sys.exit(124)
+        else:
+            # Full validation for regular mode
+            gff_fail = not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["gff3"])
+            fna_fail = not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["fna"])
+            faa_fail = not all(os.path.isfile(format_path(x)) for x in addDB.reset_index()["faa"])
+            
+            if gff_fail or fna_fail or faa_fail:
+                eprint("\nERROR: some paths in addition MTDB do not exist: ", flush=True)
+                eprint(f"\tFNA: {fna_fail}; GFF3: {gff_fail}; FAA: {faa_fail}", flush=True)
+                sys.exit(124)
 
         addDB["aquisition_date"] = [date for x in addDB["ome"]]
         # make date the acquisition time
@@ -1899,6 +1910,13 @@ def main():
         help="Skip NCBI MD5" + " (expedite large reruns)",
     )
     run_args.add_argument("-c", "--cpu", type=int, default=1)
+
+    conf_args.add_argument(
+        "--light_mode", 
+        action="store_true",
+        help="Use light mode (FNA only)"
+    )
+
     args = parser.parse_args()
 
     args_dict = {
@@ -1933,6 +1951,7 @@ def main():
         args.resume,
         args.no_md5,
         args.cpu,
+        args.light_mode,
         ncbi_email=None,
         overwrite=not args.keep,
     )
