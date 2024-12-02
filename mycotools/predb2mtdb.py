@@ -738,8 +738,8 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t',
                 failed.append(add2failed(omedb[data[0]]))
                 del omedb[data[0]]
             else:
-                ome, fna_path = data[:2]
-                omedb[ome]['fna'] = fna_path
+                ome = data[0]
+                omedb[ome]['fna'] = data[2]
                 omedb[ome]['gff3'] = ''  # Empty for light mode
                 omedb[ome]['faa'] = ''   # Empty for light mode
     else:
@@ -748,23 +748,22 @@ def main(predb, refdb, wrk_dir, verbose=False, spacer='\t\t\t',
                 failed.append(add2failed(omedb[data[0]]))
                 del omedb[data[0]]
             else:
-                ome, fna_path, gff3_path, faa_path = data
-                omedb[ome]['fna'] = fna_path
-                omedb[ome]['gff3'] = gff3_path if gff3_path else ''
-                omedb[ome]['faa'] = faa_path if faa_path else ''
-                omedb[ome]['has_gff'] = 'yes' if gff3_path else 'no'
-                omedb[ome]['has_faa'] = 'yes' if faa_path else 'no'
+                ome = data[0]
+                omedb[ome]['fna'] = data[2]
+                omedb[ome]['gff3'] = data[3] if data[3] else ''
+                omedb[ome]['faa'] = data[4] if data[4] else ''
 
-    return omedb.reset_index(), failed
-
+    final_db = omedb.reset_index()
+    return final_db, failed
 
 def cli():
+    """Command line interface for predb2mtdb"""
     usage = 'Generate a predb file:\npredb2mtdb\n\nCreate a mycotoolsdb ' + \
-    'from a predb file:\npredb2mtdb <PREDBFILE>\n\nCreate a mycotoolsdb ' + \
-    'referencing an alternative master database:\npredb2mtdb <PREDBFILE> ' + \
-    '<REFERENCEDB>\nSkip failing genomes:\npredb2mtdb <PREDBFILE> -s\n\n' + \
-    'Control CPU usage:\npredb2mtdb <PREDBFILE> --cpus <NUMBER>\n' + \
-    'Default behavior uses all available CPUs.'
+            'from a predb file:\npredb2mtdb <PREDBFILE>\n\nCreate a mycotoolsdb ' + \
+            'referencing an alternative master database:\npredb2mtdb <PREDBFILE> ' + \
+            '<REFERENCEDB>\nSkip failing genomes:\npredb2mtdb <PREDBFILE> -s\n\n' + \
+            'Control CPU usage:\npredb2mtdb <PREDBFILE> --cpus <NUMBER>\n' + \
+            'Default behavior uses all available CPUs.'
 
     parser = argparse.ArgumentParser(description=usage)
     parser.add_argument('predb', nargs='?', help='Path to predb file')
@@ -775,18 +774,62 @@ def cli():
                        help='Number of CPUs to use (default: all available)')
     parser.add_argument('--light', action='store_true',
                        help='Create light database without GFF/FAA requirements')
+    parser.add_argument('-o', '--output', help='Output path for .mtdb file')
     args = parser.parse_args()
 
     if args.predb is None:
         print(gen_predb())
         sys.exit(0)
 
-    wrk_dir = os.path.abspath('./predb2mtdb_working')
+    # Set up working directory
+    predb_dir = os.path.dirname(os.path.abspath(args.predb))
+    wrk_dir = os.path.join(predb_dir, 'predb2mtdb_working')
     if not wrk_dir.endswith('/'):
         wrk_dir += '/'
+
+    # Set up output directory and path
+    out_dir = os.path.join(predb_dir, 'predb2mtdb')
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir)
     
-    main(args.predb, args.refdb, wrk_dir=wrk_dir, 
-         cpus=args.cpus, exit=not args.skip, light_mode=args.light)
-    
+    output_path = args.output if args.output else os.path.join(out_dir, 'predb2mtdb.mtdb')
+
+    # Process forbidden omes
+    forbid_omes = acq_forbid_omes(os.path.expandvars('$MYCODB/../log/relics.txt'))
+
+    try:
+        # Get reference database
+        ref_db = mtdb_light(args.refdb) if args.light else mtdb(args.refdb or primaryDB())
+
+        # Process the database
+        final_db, failed = main(
+            args.predb, 
+            ref_db, 
+            wrk_dir=wrk_dir,
+            cpus=args.cpus, 
+            exit=not args.skip,
+            light_mode=args.light,
+            forbidden=forbid_omes
+        )
+
+        # Convert to mtdb object and write output
+        db_obj = mtdb(final_db)
+        db_obj.df2db(output_path, headers=True)
+        
+        eprint(f"\nSuccessfully created database: {output_path}")
+        
+        # Report any failures
+        if failed:
+            eprint("\nFailed entries:")
+            for f in failed:
+                if f:  # Only print if there's actual failure data
+                    eprint(f"  {f[0]} (version: {f[1]})")
+
+    except Exception as e:
+        eprint(f"\nError during database processing: {str(e)}")
+        if not args.skip:  # Only exit if we're not skipping errors
+            raise
+        sys.exit(1)
+
 if __name__ == '__main__':
     cli()
