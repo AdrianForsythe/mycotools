@@ -709,7 +709,7 @@ def cli():
                        help='Skip failing genomes')
     parser.add_argument('--cpus', type=int, default=mp.cpu_count(),
                        help='Number of CPUs to use (default: all available)')
-    parser.add_argument('--light', action='store_true',
+    parser.add_argument('--light_mode', action='store_true',
                        help='Create light database without GFF/FAA requirements')
     parser.add_argument('-o', '--output', help='Output path for .mtdb file')
     args = parser.parse_args()
@@ -736,7 +736,7 @@ def cli():
 
     try:
         # Get reference database
-        ref_db = mtdb_light(args.refdb) if args.light else mtdb(args.refdb or primaryDB())
+        ref_db = mtdb_light(args.refdb) if args.light_mode else mtdb(args.refdb or primaryDB())
 
         # Process the database
         final_db, failed = main(
@@ -745,7 +745,7 @@ def cli():
             wrk_dir=wrk_dir,
             cpus=args.cpus, 
             exit=not args.skip,
-            light_mode=args.light,
+            light_mode=args.light_mode,
             forbidden=forbid_omes
         )
 
