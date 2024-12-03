@@ -1201,16 +1201,32 @@ def hg_main(
                       calc_index = calc_jaccard, cpus = cpus)
 
 
+def is_protein_sequence(sequence):
+    """Check if a sequence is protein based on character composition"""
+    protein_letters = set('ACDEFGHIKLMNPQRSTVWY')
+    unique_chars = set(sequence.upper())
+    return len(unique_chars.intersection(protein_letters)) / len(unique_chars) > 0.8
+
 def search_main(
-    db, input_genes, query_fa, query_gff, binary = 'mmseqs', fast = True, 
-    out_dir = None, clus_cons = 0.4, clus_var = 0.65, min_seq = 3, 
-    max_size = 250, cpus = 1, reoutput = True, plusminus = 10000, 
-    evalue = 1, bitscore = 40, pident = 0, mem = None, verbose = False,
-    interval = 0.01, outgroups = False, conversion_dict = {}, labels = True,
-    midpoint = True, clus_meth = 'mmseqs easy-linclust', ppos = 0,
-    max_hits = 1000, ext = '.svg', circular = False, output_loci = False
+    db, input_genes, query_fa, query_gff, binary='mmseqs', fast=True, 
+    out_dir=None, clus_cons=0.4, clus_var=0.65, min_seq=3, 
+    max_size=250, cpus=1, reoutput=True, plusminus=10000, 
+    evalue=1, bitscore=40, pident=0, mem=None, verbose=False,
+    interval=0.01, outgroups=False, conversion_dict={}, labels=True,
+    midpoint=True, clus_meth='mmseqs easy-linclust', ppos=0,
+    max_hits=1000, ext='.svg', circular=False, output_loci=False,
+    is_light_mode=False
     ):
-    """input_genes is a list of genes within an inputted cluster"""
+    """input_genes is a list of genes within an inputted cluster"""    
+    # Check if we're in light mode and adjust accordingly
+    if is_light_mode:
+        # Only allow nucleotide-based searches
+        if binary not in ['blastn', 'nhmmer']:
+            raise ValueError(f"Light mode only supports blastn and nhmmer, not {binary}")
+        
+        # Skip protein-based analyses
+        if query_fa and any(seq for seq in query_fa.values() if is_protein_sequence(seq)):
+            raise ValueError("Light mode does not support protein queries")
 
     print('\nPreparing run', flush = True)
     wrk_dir, loc_dir = out_dir + 'working/', out_dir + 'loci/'
@@ -1407,6 +1423,61 @@ def search_main(
                       re_comp = re.compile(r'SearchQuery=([^;]+)'),
                       calc_index = calc_jaccard, cpus = cpus)
 
+    # If in light mode and output_loci is True, create GFF files
+    if is_light_mode and output_loci:
+        gff_output_dir = os.path.join(out_dir, 'gff3')
+        update_gff_with_search_results(db, search_fas, gff_output_dir)
+
+    return search_fas
+
+def update_gff_with_search_results(db, search_results, output_dir):
+    """
+    Update GFF files with search results from db2search
+    
+    Args:
+        db (mtdb): MycotoolsDB object
+        search_results (dict): Results from db2search
+        output_dir (str): Directory to store updated GFF files
+    """
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    for ome, row in db.items():
+        if ome in search_results:
+            # Read original GFF if it exists
+            gff_path = row.get('gff3', '')
+            if not gff_path:
+                # Create new GFF for light mode
+                gff_data = []
+            else:
+                try:
+                    with open(gff_path, 'r') as f:
+                        gff_data = gff2list(f.read())
+                except FileNotFoundError:
+                    gff_data = []
+
+            # Add search results to GFF
+            for hit in search_results[ome]:
+                hit_data = {
+                    'seqid': hit['seqid'],
+                    'source': 'db2search',
+                    'type': 'match',
+                    'start': hit['start'],
+                    'end': hit['end'],
+                    'score': hit.get('score', '.'),
+                    'strand': hit.get('strand', '+'),
+                    'phase': '.',
+                    'attributes': f'ID={hit["id"]};Name={hit["name"]};'
+                               f'Query={hit["query"]};E-value={hit.get("evalue", ".")}'
+                }
+                gff_data.append(hit_data)
+
+            # Write updated GFF
+            output_path = os.path.join(output_dir, f"{ome}.gff3")
+            with open(output_path, 'w') as f:
+                f.write(list2gff(gff_data))
+
+    return output_dir
 
 def cli():
     parser = argparse.ArgumentParser(
@@ -1425,6 +1496,11 @@ def cli():
         '-g', '--gff',
         help = 'GFF for non-mycotools locus diagram. Requires -q fasta input'
         )
+    i_opt.add_argument(
+        '--light_mode',
+        help='Run in light mode (nucleotide-only searches)',
+        action='store_true'
+    )
 
     hg_opt = parser.add_argument_group('Homolog inference')
     hg_opt.add_argument(
@@ -1543,8 +1619,12 @@ def cli():
 
     execs = ['diamond', 'clipkit', 'mafft', 'iqtree']
     if args.search:
-        if args.search not in {'mmseqs', 'blastp', 'diamond'}:
-            eprint('\nERROR: invalid -s', flush = True)
+        if args.light_mode:
+            if args.search not in {'blastn', 'nhmmer'}:
+                eprint('\nERROR: light mode only supports blastn and nhmmer searches', flush=True)
+                sys.exit(3)
+        elif args.search not in {'mmseqs', 'blastp', 'diamond'}:
+            eprint('\nERROR: invalid -s', flush=True)
             sys.exit(3)
         else:
             execs.append(args.search)
@@ -1673,7 +1753,8 @@ def cli():
             outgroups = not args.no_outgroup, clus_meth = clus_meth,
             midpoint = not bool(args.no_midpoint), ext = out_ext,
             conversion_dict = conversion_dict, circular = args.circular,
-            output_loci = args.loci
+            output_loci = args.loci,
+            is_light_mode=args.light_mode
             )
     else:
         new_log = init_log(
@@ -1698,7 +1779,8 @@ def cli():
             conversion_dict = conversion_dict, 
             clus_meth = clus_meth, labels = not args.no_label,
             max_hits = args.max_target_seq, ext = out_ext, 
-            circular = args.circular, output_loci = args.loci
+            circular = args.circular, output_loci = args.loci,
+            is_light_mode=args.light_mode
             )
     outro(start_time)
 
