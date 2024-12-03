@@ -1427,6 +1427,7 @@ def db2primary(addDB, refDB, save=False, combined=False, light_mode=False):
         raise KeyError(
             "ERROR: ome codes exist in database. Rerun predb2mtdb or remove manually"
         )
+
     for i, ome in enumerate(addDB["ome"]):
         # Handle FNA files (required in both modes)
         if os.path.isfile(addDB["fna"][i]):
@@ -1439,20 +1440,22 @@ def db2primary(addDB, refDB, save=False, combined=False, light_mode=False):
             # Only process GFF3 and FAA in full mode
             if os.path.isfile(addDB["gff3"][i]):
                 move_ns(addDB["gff3"][i], format_path("$MYCOGFF3/" + ome + ".gff3"))
+                addDB["gff3"][i] = os.environ["MYCOGFF3"] + ome + ".gff3"
             elif not os.path.isfile(format_path("$MYCOGFF3/" + ome + ".gff3")):
                 raise FileNotFoundError(f"{ome} missing gff3 for unknown reason")
 
             if os.path.isfile(addDB["faa"][i]):
                 move_ns(addDB["faa"][i], format_path("$MYCOFAA/" + ome + ".faa"))
+                addDB["faa"][i] = os.environ["MYCOFAA"] + ome + ".faa"
             elif not os.path.isfile(format_path("$MYCOFAA/" + ome + ".faa")):
                 raise FileNotFoundError(f"{ome} missing faa for unknown reason")
-
-            addDB["gff3"][i] = os.environ["MYCOGFF3"] + ome + ".gff3"
-            addDB["faa"][i] = os.environ["MYCOFAA"] + ome + ".faa"
         else:
             # Set empty paths for GFF3 and FAA in light mode
             addDB["gff3"][i] = ""
             addDB["faa"][i] = ""
+            addDB["has_gff"] = "no"
+            addDB["has_faa"] = "no"
+
     addDB = addDB.set_index()
     for ome, row in addDB.items():
         refDB[ome] = row
@@ -1721,7 +1724,7 @@ def control_flow(
 
         write_forbid_omes(set(addDB["ome"]), format_path("$MYCODB/../log/relics.txt"))
 
-        new_mtdb, update_omes = db2primary(addDB, orig_mtdb, save=True)
+        new_mtdb, update_omes = db2primary(addDB, orig_mtdb, save=True, light_mode=light_mode)
         new_db_path = format_path("$MYCODB/" + date + ".mtdb")
 
         new_mtdb.df2db(new_db_path)
@@ -1806,7 +1809,7 @@ def control_flow(
         if format_path(db_path) == new_path:
             shutil.copy(db_path, db_path + ".tmp")
         full_mtdb, update_omes = db2primary(
-            update_mtdb, new_mtdb, save=False, combined=True
+            update_mtdb, new_mtdb, save=False, combined=True, light_mode=light_mode
         )
         full_mtdb.df2db(new_path + ".tmp")
         try:
