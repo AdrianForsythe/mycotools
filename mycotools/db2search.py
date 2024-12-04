@@ -639,9 +639,8 @@ def db2searchLog(report_dir, blast, query, max_hits,
 def prepare_search_run(
     db, report_dir, blast, query, 
     max_hits, evalue, out_dir, bit, pident,
-    coverage, ppos
+    coverage, ppos=0
     ):
-
 
     prev, finished, rundb = False, set(), db
     if isinstance(query, list):
@@ -913,9 +912,9 @@ def mmseqs_main(
     pident = 0, mem = None, coverage = None,
     cpus = 1, biotype = None,
     skip = [], coordinate = False,
-    search_arg = [], convert = False, iterations = 3,
+    search_arg = [], convert = False, iterations = 3
     ):
-
+    
     report_dir = prepOutput(out_dir)
     if isinstance(query, str):
         query = [query]
@@ -924,13 +923,12 @@ def mmseqs_main(
             out.write(dict2fa(query))
         query = [out_dir + 'query.fa'] 
 
-
-
-    rundb, reparse = prepare_search_run(
+    rundb, reparse, report_dir = prepare_search_run(
         db, report_dir, mmseqs, query, 
         max_hits, evalue, out_dir, bitscore, pident,
         coverage
-        )
+    )
+
     results_dict = mmseqs_mngr(
         db, rundb, mmseqs, report_dir, biotype,
         query, max_hits, evalue, cpus,
@@ -1117,8 +1115,10 @@ def cli():
             with open(format_path(args.query_file), 'r') as raw:
                 queries = [format_path(x.rstrip()) for x in raw.read().split()]
 
-    # Load database and check compatibility
-    db = validate_database(format_path(args.mtdb), light_mode=isinstance(db, mtdb_light))
+    # Load database
+    db = validate_database(format_path(args.mtdb))
+
+    # Check if the database is a light database
     is_light_db = isinstance(db, mtdb_light)
 
     # Validate search algorithm compatibility
