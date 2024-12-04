@@ -856,8 +856,10 @@ def ref_update(
 
     try:
         ncbi_db = db2df(update_path + date + ".ncbi.predb2.mtdb")
+        ncbi_mtdb = mtdb(update_path + date + ".ncbi.predb2.mtdb")
     except pd.errors.EmptyDataError:
-        ncbi_db = pd.DataFrame({x: [] for x in refdbncbi.keys()})
+        ncbi_db = pd.DataFrame(columns=mtdb.columns)
+        ncbi_mtdb = mtdb()
     if len(ncbi_db) > 0:
         #        df2db(ncbi_db, ncbi_db_path)
         new_db = pd.concat([new_db, ncbi_db])
@@ -1219,7 +1221,8 @@ def rogue_update(
         ncbi_db = db2df(update_path + date + ".ncbi.predb2.mtdb")
         ncbi_mtdb = mtdb(update_path + date + ".ncbi.predb2.mtdb")
     except pd.errors.EmptyDataError:
-        ncbi_db = pd.DataFrame({x: [] for x in refdbncbi.keys()})
+        # Use mtdb columns instead of undefined refdbncbi
+        ncbi_db = pd.DataFrame(columns=mtdb.columns)
         ncbi_mtdb = mtdb()
     if len(ncbi_db) > 0:
         df2db(ncbi_db, ncbi_db_path)
