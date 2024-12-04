@@ -639,11 +639,63 @@ def prepare_ref_db(ref_db, date):
 
     return jgi.mtdb2pd(), ncbi.mtdb2pd()
 
+def biosample_redundancy_check(db, gff_lengths):
+    """
+    Remove duplicate entries based on biosample ID, keeping the most recent version
+    or the one with the longest GFF file.
+    
+    Args:
+        db (pd.DataFrame): MTDB database dataframe
+        gff_lengths (dict): Dictionary mapping 'ome' identifiers to GFF file lengths
+        
+    Returns:
+        pd.DataFrame: Deduplicated database
+    """
+    biosample_groups = db.groupby('biosample')
+    
+    to_remove = []
+    
+    for biosample, group in biosample_groups:
+        if len(group) > 1 and biosample.strip():
+            dates = pd.to_datetime(group['version'], errors='coerce')
+            
+            most_recent_idx = dates.idxmax()
+            
+            gff_lengths_group = {idx: gff_lengths.get(db.loc[idx, 'ome'], 0) for idx in group.index}
+            longest_gff_idx = max(gff_lengths_group, key=gff_lengths_group.get)
+            
+            if longest_gff_idx != most_recent_idx:
+                to_remove.extend([idx for idx in group.index if idx != longest_gff_idx])
+            else:
+                to_remove.extend([idx for idx in group.index if idx != most_recent_idx])
+    
+    cleaned_db = db.drop(to_remove)
+    
+    return cleaned_db
+
+def get_gff_lengths(db):
+    """Get the lengths of GFF files for each genome in the database
+    
+    Args:
+        db (dict/DataFrame): MTDB database
+        
+    Returns:
+        dict: Mapping of ome IDs to their GFF file lengths
+    """
+    gff_lengths = {}
+    for ome in db['ome']:
+        gff_path = f"{os.environ['MYCOGFF3']}/{ome}.gff3"
+        try:
+            with open(gff_path, 'r') as f:
+                gff_lengths[ome] = sum(1 for line in f if not line.startswith('#'))
+        except FileNotFoundError:
+            gff_lengths[ome] = 0
+    return gff_lengths
 
 def internal_redundancy_check(db):
     """Check the inputted database for overlapping assembly accessions and
     dereplicate, including those with different versions of the same
-    accession"""
+    accession and replicated biosamples (keeping the most recent version or that with the most complete annotations [longest gff3])"""
     db = mtdb.pd2mtdb(db).set_index()
     ncbi_db = {k: v for k, v in db.items() if v["source"] == "ncbi"}
     jgi_db = {k: v for k, v in db.items() if v["source"] == "jgi"}
@@ -699,7 +751,16 @@ def internal_redundancy_check(db):
                 for ome in omes[1:]:
                     del db[ome]
 
-    return db2df(db.reset_index())
+    # Convert back to DataFrame for biosample deduplication
+    db_df = db2df(db.reset_index())
+    
+    # Get GFF lengths
+    gff_lengths = get_gff_lengths(db_df)
+    
+    # Perform biosample-based deduplication
+    db_df = biosample_redundancy_check(db_df, gff_lengths)
+
+    return db_df
 
 
 def ref_update(
